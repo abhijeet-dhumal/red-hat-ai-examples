@@ -8,10 +8,11 @@ Orpheus-3B is a 3.3B-parameter codec language model built on Llama-3 that genera
 
 The example demonstrates:
 
-- **SNAC audio codec preprocessing** -- encoding raw audio into interleaved codec token sequences
+- **SNAC audio codec preprocessing** -- encoding raw audio into interleaved codec token sequences (rank 0, inside the TrainJob)
 - **LoRA fine-tuning** via `TransformersTrainer` -- distributed across multiple nodes with PyTorch DDP
 - **Audio-only loss masking** -- cross-entropy computed only on audio token positions
-- **Post-training inference** -- generating Turkish speech and decoding SNAC tokens back to waveforms
+- **MLflow tracking** -- loss, in-training WAV samples, and Whisper WER/CER
+- **Post-training inference** -- merging LoRA and generating Turkish speech in the workbench
 
 ### How it works
 
@@ -52,6 +53,7 @@ Each training sample interleaves text BPE tokens with SNAC codec tokens (7 per a
 - GPU worker nodes for distributed training (A100 recommended)
 - A shared PVC with **ReadWriteMany (RWX)** access mode
   - **Suggested size**: 150Gi (base model ~7GB, SNAC model ~200MB, preprocessed dataset, checkpoints)
+- Optional: MLflow tracking server reachable from training pods (platform MLflow, or an in-namespace server at `http://mlflow.<namespace>.svc.cluster.local:5000`)
 
 ## Hardware requirements
 
@@ -67,13 +69,23 @@ Each training sample interleaves text BPE tokens with SNAC codec tokens (7 per a
 |-----------|--------------|---|---|-----|--------|
 | Training pods | 2 nodes x 1 GPU | 1 | 2 | 4 cores/pod | 32Gi/pod |
 
-> **Note:** This example was tested on 2 x A100-80GB. It will work on other Ampere+ GPUs (L40S, H100) with adjusted batch size. For GPUs with less than 40GB VRAM, reduce `BATCH_SIZE` to 1 or increase `GRAD_ACCUM`.
+> **Note:** This example was tested on 2 x A100-80GB. It will work on other Ampere+ GPUs (L40S, H100) with adjusted batch size. For GPUs with less than 40GB VRAM, reduce `batch_size` to 1 or increase `grad_accum`.
 
 ### Storage requirements
 
 | Purpose | Size | Access Mode | Notes |
 |---------|------|-------------|-------|
-| Shared PVC | 150Gi | RWX | Base model, SNAC model, preprocessed data, checkpoints |
+| Shared PVC (`shared`) | 150Gi | RWX | HF cache, preprocessed data, checkpoints, merged model |
+
+Layout on the PVC (workbench mount `/opt/app-root/src/shared`, TrainJob mount `/mnt/kubeflow-checkpoints`):
+
+```text
+shared/orpheus-tts/
+  hf-cache/
+  preprocessed/          # versioned sentinel .done-<hash>
+  checkpoints/           # TrainJob output_dir
+  final/                 # merged model (workbench cell)
+```
 
 ## Setup
 
@@ -81,8 +93,8 @@ Each training sample interleaves text BPE tokens with SNAC codec tokens (7 per a
 
 1. In the OpenShift AI dashboard, go to **Data Science Projects** and create or select a project.
 2. Create a workbench with the **Training | Jupyter | PyTorch | CUDA | Python** image.
-3. Attach a GPU hardware profile (1x GPU minimum).
-4. Create a shared **RWX PVC** (150Gi recommended) and attach it to the workbench.
+3. Attach a GPU hardware profile (**4 CPU / 32Gi memory / 1 GPU** recommended).
+4. Create a shared **RWX PVC** named `shared` (150Gi recommended) and attach it to the workbench at `/opt/app-root/src/shared`.
 
 ### Clone and open the notebook
 
@@ -94,18 +106,28 @@ git clone https://github.com/red-hat-data-services/red-hat-ai-examples.git
 
 Navigate to `examples/trainer/orpheus-tts` and open `orpheus_tts_distributed.ipynb`.
 
+### Edit configuration
+
+In the `%%yaml parameters` cell, set at least:
+
+- `namespace` — your Data Science Project name
+- `mlflow_experiment` — experiment name for tracking
+
 ## Usage
 
 The notebook walks you through the full workflow:
 
-1. **Install dependencies** -- Kubeflow SDK
-2. **Configure authentication and paths** -- API access, PVC mounts, hyperparameters, MLflow
-3. **Define the training function** -- Wraps `train_orpheus.py` which handles SNAC preprocessing (rank 0), LoRA fine-tuning, and MLflow tracking
-4. **Submit distributed training** -- `TransformersTrainer` with DDP across 2 nodes, periodic + JIT checkpointing, and real-time progression tracking
-5. **Monitor training** -- Stream logs, check progress in the OpenShift AI Dashboard (step, loss, ETA)
-6. **Merge LoRA adapter** -- Combine adapter weights into standalone model
-7. **Generate Turkish speech** -- Run inference and listen to audio output
-8. **Cleanup** -- Delete the training job
+1. **Install dependencies** — Kubeflow SDK + `yamlmagic`
+2. **Configure parameters** — `%%yaml parameters` (infrastructure, LoRA, training, logging)
+3. **Define `train_func`** — self-contained training logic (must be inline; `TransformersTrainer` serializes via `inspect.getsource()`)
+4. **Authenticate** — `TrainerClient` via `NOTEBOOK_USER_TOKEN` or the workbench service-account token
+5. **Submit distributed training** — `TransformersTrainer` with DDP, periodic + JIT checkpointing, progression tracking, MLflow env
+6. **Monitor training** — stream logs; inspect metrics/artifacts in MLflow
+7. **Merge LoRA adapter** — combine adapter weights into a standalone model on the shared PVC
+8. **Generate Turkish speech** — run inference and listen to audio in the notebook
+9. **Cleanup** — delete the training job
+
+> **Note:** `train_orpheus.py` is an optional CLI companion for local/scripted runs. The notebook does **not** import it — all TrainJob logic lives inside `train_func`.
 
 ## Expected outcomes
 
@@ -113,9 +135,10 @@ After training completes:
 
 - A merged model at `<PVC>/orpheus-tts/final/` capable of generating Turkish speech
 - Training checkpoints at `<PVC>/orpheus-tts/checkpoints/`
+- MLflow runs with loss curves, audio samples, and WER/CER (when a tracker is configured)
 - Generated audio samples playable in the notebook
 
-With 2,000 training samples and 3 epochs, expect noticeably improved Turkish intelligibility compared to the English-only pretrained model. For production quality, increase `MAX_SAMPLES` to 20,000+ and `NUM_EPOCHS` to 8.
+With 2,000 training samples and 3 epochs, expect noticeably improved Turkish intelligibility compared to the English-only pretrained model. For production quality, increase `max_train_samples` to 20,000+, `num_epochs` to 8, and use `lora_r: 32` / `lora_alpha: 64`.
 
 ### Reference results (20K samples, 8 epochs, 2× A100-80GB)
 
@@ -145,27 +168,47 @@ See the [HuggingFace model card](https://huggingface.co/AbDhumal/orpheus-3b-turk
 
 ## Customization
 
+Edit the `%%yaml parameters` cell (passed to `train_func` as `func_args`):
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `MAX_SAMPLES` | 2000 | Training samples (0 = full ~81K dataset) |
-| `NUM_NODES` | 2 | Distributed training nodes |
-| `GPUS_PER_NODE` | 1 | GPUs per training node |
-| `BATCH_SIZE` | 4 | Per-device batch size (gradient checkpointing enables larger batches) |
-| `GRAD_ACCUM` | 2 | Gradient accumulation steps |
-| `NUM_EPOCHS` | 3 | Training epochs |
-| `LEARNING_RATE` | 2e-5 | AdamW learning rate |
-| `LORA_R` | 16 | LoRA rank (production run used 32) |
-| `LORA_ALPHA` | 32 | LoRA alpha (production run used 64) |
+| `namespace` | _(edit)_ | OpenShift AI project / Kubernetes namespace |
+| `mlflow_experiment` | `orpheus-turkish-tts` | MLflow experiment name |
+| `max_train_samples` | 2000 | Training samples (0 = full ~81K dataset) |
+| `num_nodes` | 2 | Distributed training nodes |
+| `gpus_per_node` | 1 | GPUs per training node |
+| `batch_size` | 4 | Per-device batch size (gradient checkpointing enables larger batches) |
+| `grad_accum` | 2 | Gradient accumulation steps |
+| `num_epochs` | 3 | Training epochs |
+| `learning_rate` | 1e-4 | AdamW learning rate (LoRA typically 1e-4–2e-4) |
+| `lora_r` | 16 | LoRA rank (production run used 32) |
+| `lora_alpha` | 32 | LoRA alpha (production run used 64) |
+| `lora_dropout` | 0 | LoRA dropout |
+| `save_steps` | 200 | Checkpoint cadence (auto-aligned to a multiple of `eval_steps`) |
+| `eval_steps` | 100 | Loss evaluation cadence |
+| `audio_log_steps` | 500 | In-training wav + Whisper cadence (keep sparse) |
 
 ## Troubleshooting
 
 ### SNAC preprocessing is slow
 
-SNAC encoding runs on GPU inside the TrainJob (rank 0). For large datasets (>10K samples), the first run may take 15-30 minutes. Subsequent runs skip preprocessing if the `.done` sentinel exists on the PVC.
+SNAC encoding runs on GPU inside the TrainJob (rank 0). For large datasets (>10K samples), the first run may take 15–30 minutes. Subsequent runs skip preprocessing when a matching versioned `.done-<hash>` sentinel exists on the PVC.
+
+### Permission denied on the shared PVC
+
+Some NFS storage classes provision volumes as `root:<fixed-gid>` with mode `755`. Training pods then cannot write. Ensure the PVC root (or `orpheus-tts/`) is group/world-writable for your namespace UIDs, or use a storage class that respects `fsGroup`.
 
 ### Out of memory during training
 
-Reduce `BATCH_SIZE` to 1 and increase `GRAD_ACCUM` to maintain the same effective batch size. Alternatively, use GPUs with more VRAM.
+Reduce `batch_size` to 1 and increase `grad_accum` to maintain the same effective batch size. Alternatively, use GPUs with more VRAM.
+
+### Out of memory during LoRA merge / inference
+
+Merge and generate run in the **workbench**, not the TrainJob. Use at least **32Gi** workbench memory (see hardware profile limits).
+
+### MLflow connection errors
+
+Training pods use `MLFLOW_TRACKING_URI` from the workbench env when set; otherwise they fall back to `http://mlflow.<namespace>.svc.cluster.local:5000`. Point the workbench (or trainer `env`) at a reachable tracker, or temporarily set `report_to="none"` in `train_func` for a smoke run.
 
 ### NCCL errors
 
@@ -177,7 +220,7 @@ Ensure all training nodes can communicate on the required ports. Add `NCCL_DEBUG
 
 ### Generated audio is silent or garbled
 
-- Verify the preprocessed dataset has the `.done` sentinel file on PVC
+- Verify the preprocessed dataset has a matching `.done-<hash>` sentinel on the PVC
 - Check that the SNAC model was downloaded correctly
 - Ensure the base model is `unsloth/orpheus-3b-0.1-pretrained` (Llama-3 vocab, not Llama-2)
 
