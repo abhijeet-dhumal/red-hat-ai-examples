@@ -69,7 +69,7 @@ At inference, load the pretrained Orpheus base weights together with the trained
 | Training pods | 2 nodes × 2 GPUs (notebook default) | 2 | 4 | 4 cores/pod | 32Gi/pod |
 
 > [!NOTE]
-> Tested on A100-80GB. Works on other Ampere+ GPUs (L40S, H100) with adjusted batch size. For GPUs with less than 40GB VRAM, reduce `batch_size` to 1 or increase `grad_accum`. You can also set `gpus_per_node: 1` for a smaller footprint.
+> Tested on A100-80GB. Works on other Ampere+ GPUs (L40S, H100) with adjusted batch size. For GPUs with less than 40GB VRAM, reduce `batch_size` first (for example to `1`); then increase `grad_accum` if you want to keep the same effective batch size. `grad_accum` alone does not lower peak VRAM. You can also set `gpus_per_node: 1` for a smaller footprint.
 
 #### Storage
 
@@ -94,9 +94,11 @@ The notebook authenticates to the cluster API using:
 | Variable | Description |
 | --- | --- |
 | `NOTEBOOK_USER_TOKEN` | Auth token (often auto-set in the workbench); otherwise the notebook falls back to the service-account token |
-| `MLFLOW_TRACKING_URI` | Optional; forwarded into training pods when set |
+| `MLFLOW_TRACKING_URI` | Optional; forwarded into training pods when set. Prefer `https://` when the tracker presents a trusted certificate |
+| `MLFLOW_TRACKING_INSECURE_TLS` | Optional; set to `true` only for development against a tracker with an untrusted/self-signed cert |
+| `K8S_VERIFY_SSL` | Optional; set to `false` to disable Kubernetes API TLS verify (default verifies when the in-cluster CA is present) |
 
-Workbench pods can also reach the API at `https://kubernetes.default.svc` with the mounted service-account token.
+Workbench pods can also reach the API at `https://kubernetes.default.svc` with the mounted service-account token. The notebook loads `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` when present and enables TLS verification unless `K8S_VERIFY_SSL=false`.
 
 ## PVC mount paths (workbench vs training pods)
 
@@ -269,11 +271,11 @@ No, if the shared PVC still has artifacts:
 | Preprocessed SNAC data | `orpheus-tts/preprocessed/` + `.done-<hash>` | Skipped if fingerprint matches |
 | Trainer checkpoints | `orpheus-tts/checkpoints/checkpoint-*` | Auto-resumed via `get_last_checkpoint` |
 
-Resubmit the TrainJob with the same YAML fingerprint (`dataset|samples|seq|model`). A config change invalidates the preprocess sentinel and starts a fresh encode; checkpoints from a different hyperparameter set should be cleared manually if you do not want to resume them.
+Resubmit the TrainJob with the same fingerprint. The preprocess sentinel hashes dataset id, sample/seq limits, base model, SNAC model id, and encode constants (`SNAC_SR`, `CODE_OFFSET`, frames/codebook). It does **not** pin Hugging Face dataset/model git revisions — if you change the upstream revision or preprocessing code beyond those fields, delete `orpheus-tts/preprocessed/` (and the `.done-*` sentinels) before rerunning. Checkpoints from a different hyperparameter set should be cleared manually if you do not want to resume them.
 
 ### Permission denied on the shared PVC
 
-Some NFS storage classes provision volumes as `root:<fixed-gid>` with mode `755`. Training pods then cannot write. Ensure the PVC root (or `orpheus-tts/`) is group/world-writable for your namespace UIDs, or use a storage class that respects `fsGroup`.
+Some NFS storage classes provision volumes as `root:<fixed-gid>` with mode `755`. Training pods then cannot write. Prefer a storage class that respects `fsGroup`, or set a group ACL / shared GID so only the project workloads that need write access can update checkpoints and preprocessed data. Avoid world-writable (`o+w`) permissions.
 
 ### Out of memory during training
 
@@ -285,7 +287,7 @@ Base + LoRA load runs in the **workbench**, not the TrainJob. Use at least **32G
 
 ### MLflow connection errors
 
-Training pods use `MLFLOW_TRACKING_URI` from the workbench env when set; otherwise they fall back to `http://mlflow.<namespace>.svc.cluster.local:5000`. Point the workbench (or trainer `env`) at a reachable tracker, or temporarily set `report_to="none"` in `train_func` for a smoke run.
+Training pods use `MLFLOW_TRACKING_URI` from the workbench env when set; otherwise they fall back to the in-namespace service `http://mlflow.<namespace>.svc.cluster.local:5000` (cluster-internal HTTP). Prefer HTTPS with a trusted cert when available. Only set `MLFLOW_TRACKING_INSECURE_TLS=true` for development against a self-signed tracker. Point the workbench (or trainer `env`) at a reachable tracker, or temporarily set `report_to="none"` in `train_func` for a smoke run.
 
 ### NCCL errors / "No space left on device" on `/dev/shm`
 
