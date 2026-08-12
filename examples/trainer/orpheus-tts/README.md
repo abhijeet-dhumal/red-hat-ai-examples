@@ -293,7 +293,7 @@ Training pods use `MLFLOW_TRACKING_URI` from the workbench env when set; otherwi
 
 When using multiple GPUs per node (`gpus_per_node > 1`), NCCL allocates shared-memory segments under `/dev/shm` for intra-node communication. The default Kubernetes `emptyDir` is 64MB — too small. The notebook injects a `PodTemplateOverrides` with a 1Gi memory-backed `/dev/shm` volume. If you remove that override and see:
 
-```
+```text
 Error while creating shared memory segment /dev/shm/nccl-… No space left on device
 ```
 
