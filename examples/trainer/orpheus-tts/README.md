@@ -201,7 +201,17 @@ After training completes:
 * LoRA adapter at `<PVC>/orpheus-tts/checkpoints/final/` (inference = base model + adapter)
 * Intermediate checkpoints at `<PVC>/orpheus-tts/checkpoints/checkpoint-*`
 * MLflow runs with loss curves, audio samples, and WER/CER (when a tracker is configured)
-* Generated audio samples playable in the notebook
+* Generated audio samples playable in the notebook (reference clips under [`audios/`](./audios/))
+
+### Sample audio
+
+Before = pretrained English Orpheus (step 0 / baseline). After = fine-tuned Turkish LoRA.
+
+| Clip | Before (step 0) | After (fine-tuned) |
+| --- | --- | --- |
+| welcome | <audio controls src="./audios/before/welcome.wav"></audio> ([wav](./audios/before/welcome.wav)) | <audio controls src="./audios/after/welcome.wav"></audio> ([wav](./audios/after/welcome.wav)) |
+| flight | <audio controls src="./audios/before/flight.wav"></audio> ([wav](./audios/before/flight.wav)) | <audio controls src="./audios/after/flight.wav"></audio> ([wav](./audios/after/flight.wav)) |
+| farewell | <audio controls src="./audios/before/farewell.wav"></audio> ([wav](./audios/before/farewell.wav)) | <audio controls src="./audios/after/farewell.wav"></audio> ([wav](./audios/after/farewell.wav)) |
 
 ### Reference results (notebook standalone run)
 
