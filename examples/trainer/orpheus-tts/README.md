@@ -1,25 +1,25 @@
 # Orpheus Turkish TTS Fine-Tuning with LoRA
 
-Fine-tune [Orpheus-3B](https://huggingface.co/unsloth/orpheus-3b-0.1-pretrained) for **Turkish text-to-speech** using LoRA and the Kubeflow Trainer v2 on Red Hat OpenShift AI.
+Fine-tune [Orpheus-3B](https://huggingface.co/unsloth/orpheus-3b-0.1-pretrained) for **Turkish text-to-speech** with LoRA and Kubeflow Trainer v2 on Red Hat OpenShift AI.
 
 ## Overview
 
-Orpheus-3B is a 3.3B-parameter codec language model built on Llama-3 that generates speech as discrete SNAC audio tokens. By default it only supports English. This example fine-tunes it on Turkish text-audio pairs so it produces intelligible Turkish speech.
+Orpheus-3B is a 3.3B-parameter codec language model (Llama-3 backbone) that generates speech as discrete SNAC audio tokens. The pretrained checkpoint is English-oriented. This example fine-tunes it on Turkish text–audio pairs so it produces intelligible Turkish speech.
 
 ### Key features
 
 | Feature | Description |
 | --- | --- |
-| **LoRA fine-tuning** | Distributed across multiple nodes with PyTorch DDP via `TransformersTrainer` |
+| **LoRA fine-tuning** | Multi-node PyTorch DDP via `TransformersTrainer` |
 | **Progress tracking** | Live steps, epochs, loss, and ETA in the OpenShift AI Jobs dashboard |
 | **JIT checkpointing** | Pause-safe / preemption-safe saves to the shared PVC; auto-resume on restart |
-| **Kueue scheduling** | TrainJobs are admitted and queued through Kueue (gang scheduling, quotas, prioritization) |
-| **MLflow tracking** | Loss, in-training WAV samples, and Whisper WER/CER |
-| **Post-training inference** | Load base model + LoRA adapter (no weight merge) and generate Turkish speech in the workbench |
+| **Kueue scheduling** | TrainJobs admitted and queued through Kueue |
+| **MLflow tracking** | Loss, in-training WAV samples, and Whisper WER/CER (optional tracker) |
+| **Post-training inference** | Load base model + LoRA adapter in the workbench (no weight merge) |
 
 > [!IMPORTANT]
-> This example has been tested with OpenShift AI 3.2+ and Kubeflow Trainer v2 on NVIDIA A100-80GB.
-> If you have different hardware, adjust `batch_size`, `grad_accum`, and `resources_per_node` accordingly.
+> Tested with OpenShift AI 3.2+ and Kubeflow Trainer v2 on NVIDIA A100-80GB.
+> On different GPUs, adjust `batch_size`, `grad_accum`, and `resources_per_node` in the notebook.
 
 ### How it works
 
@@ -31,303 +31,257 @@ Turkish text
     → speech waveform
 ```
 
-Orpheus treats speech as a sequence of discrete audio tokens produced by the SNAC codec. During fine-tuning, each training example places Turkish text tokens and the corresponding SNAC audio tokens in a single sequence. The model is trained to generate the audio tokens conditioned on the text; the loss is computed only on audio positions so the objective focuses on speech generation rather than reconstructing the prompt.
-
-At inference, load the pretrained Orpheus base weights together with the trained LoRA adapter (no full weight merge). The model emits SNAC tokens for the input text; the SNAC decoder converts those tokens into a 24 kHz waveform.
+During fine-tuning, each example is a single sequence of Turkish text tokens followed by SNAC audio tokens. Loss is computed only on audio positions. At inference, load the pretrained base weights plus the LoRA adapter; the model emits SNAC tokens and the SNAC decoder produces a 24 kHz waveform.
 
 ### Model and dataset
 
 | Component | Details |
-|-----------|---------|
-| **Base model** | [unsloth/orpheus-3b-0.1-pretrained](https://huggingface.co/unsloth/orpheus-3b-0.1-pretrained) (3.3B, Llama-3 backbone) |
+| --- | --- |
+| **Base model** | [unsloth/orpheus-3b-0.1-pretrained](https://huggingface.co/unsloth/orpheus-3b-0.1-pretrained) |
 | **Audio codec** | [hubertsiuzdak/snac_24khz](https://huggingface.co/hubertsiuzdak/snac_24khz) |
-| **Dataset** | [afkfatih/turkish-tts-combined-raw](https://huggingface.co/datasets/afkfatih/turkish-tts-combined-raw) (~81K text-audio pairs) |
-| **Fine-tuning method** | LoRA on attention + MLP projections (notebook default: r=64, alpha=128) |
+| **Dataset** | [afkfatih/turkish-tts-combined-raw](https://huggingface.co/datasets/afkfatih/turkish-tts-combined-raw) (~81K pairs) |
+| **Fine-tuning** | LoRA on attention + MLP projections (notebook default: r=64, α=128) |
 
 ## Requirements
 
 ### OpenShift AI cluster
 
-* Red Hat OpenShift AI (RHOAI) 3.2+ with:
-  * `dashboard`, `trainer`, and `workbenches` components enabled
-* At least 2 worker nodes with NVIDIA GPUs (A100 recommended)
-* A dynamic storage provisioner that supports **ReadWriteMany (RWX)** PVCs
-* Optional: MLflow tracking server reachable from training pods (platform MLflow, or an in-namespace server at `http://mlflow.<namespace>.svc.cluster.local:5000`)
+* Red Hat OpenShift AI (RHOAI) 3.2+ with `dashboard`, `trainer`, and `workbenches` enabled
+* At least 2 GPU worker nodes (A100 recommended)
+* A storage class that supports **ReadWriteMany (RWX)** PVCs and **non-root / `fsGroup` writes**
+* Optional: MLflow reachable from training pods (platform MLflow, or in-namespace `http://mlflow.<namespace>.svc.cluster.local:5000`)
 
-### Hardware requirements
+### Hardware
 
 #### Workbench
 
 | Image | GPU | CPU | Memory | Notes |
 | --- | --- | --- | --- | --- |
-| Training \| Jupyter \| PyTorch \| CUDA \| Python | 1× GPU | 4 cores | 32Gi | GPU required for post-training inference (base + LoRA) |
+| Training \| Jupyter \| PyTorch \| CUDA \| Python | 1× GPU | 4 cores | 32Gi | GPU required for post-training inference |
 
-#### Training job
+#### Training job (notebook defaults)
 
-| Component | Configuration | GPU per node | Total GPU | CPU | Memory |
-| --- | --- | --- | --- | --- | --- |
-| Training pods | 2 nodes × 2 GPUs (notebook default) | 2 | 4 | 4 cores/pod | 32Gi/pod |
+| Component | Nodes × GPUs | CPU / pod | Memory / pod |
+| --- | --- | --- | --- |
+| TrainJob pods | 2 × 2 | 4 cores | 32Gi |
 
 > [!NOTE]
-> Tested on A100-80GB. Works on other Ampere+ GPUs (L40S, H100) with adjusted batch size. For GPUs with less than 40GB VRAM, reduce `batch_size` first (for example to `1`); then increase `grad_accum` if you want to keep the same effective batch size. `grad_accum` alone does not lower peak VRAM. You can also set `gpus_per_node: 1` for a smaller footprint.
+> For GPUs with less than ~40 GiB VRAM, set `batch_size: 1` first, then raise `grad_accum` if you want a similar effective batch. `grad_accum` alone does not reduce peak VRAM. You can also set `gpus_per_node: 1`.
 
 #### Storage
 
 | Purpose | Size | Access mode | Notes |
 | --- | --- | --- | --- |
-| Shared PVC (`shared`) | 150Gi recommended (60Gi minimum) | ReadWriteMany (RWX) | HF cache, preprocessed data, LoRA checkpoints |
+| PVC named `shared` | 150 GiB recommended (60 GiB minimum) | RWX | Must be writable from the workbench |
 
-Layout on the PVC (workbench mount `/opt/app-root/src/shared`, TrainJob mount `/mnt/kubeflow-checkpoints`):
+Layout (created automatically by the Training Job cell):
 
 ```text
 shared/orpheus-tts/
   hf-cache/
-  preprocessed/          # versioned sentinel .done-<hash>
-  checkpoints/           # TrainJob output_dir (LoRA adapters; use checkpoints/final)
-  logs/                  # rank0.log + rank0-FATAL.txt
+  preprocessed/     # SNAC cache + .done-<hash> sentinel
+  checkpoints/      # LoRA adapters (use checkpoints/final for inference)
+  logs/
+  tensorboard/
 ```
+
+| Where | Path |
+| --- | --- |
+| Workbench | `/opt/app-root/src/shared` |
+| TrainJob pods | `/mnt/kubeflow-checkpoints` (same PVC; SDK mount) |
 
 ## Environment variables
 
-The notebook authenticates to the cluster API using:
+Usually auto-set in OpenShift AI workbenches:
 
-| Variable | Description |
-| --- | --- |
-| `NOTEBOOK_USER_TOKEN` | Auth token (often auto-set in the workbench); otherwise the notebook falls back to the service-account token |
-| `MLFLOW_TRACKING_URI` | Optional; forwarded into training pods when set. Prefer `https://` when the tracker presents a trusted certificate |
-| `MLFLOW_TRACKING_INSECURE_TLS` | Optional; set to `true` only for development against a tracker with an untrusted/self-signed cert |
-| `K8S_VERIFY_SSL` | Optional; set to `false` to disable Kubernetes API TLS verify (default verifies when the in-cluster CA is present) |
+| Variable | Required | Description |
+| --- | --- | --- |
+| `OPENSHIFT_API_URL` | Yes | OpenShift API server URL |
+| `NOTEBOOK_USER_TOKEN` | Yes | User token for API access (`oc whoami -t` if unset) |
+| `MLFLOW_TRACKING_URI` | No | Tracker URL for training pods |
+| `MLFLOW_TRACKING_INSECURE_TLS` | No | Set `true` only for self-signed HTTPS trackers |
 
-Workbench pods can also reach the API at `https://kubernetes.default.svc` with the mounted service-account token. The notebook loads `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` when present and enables TLS verification unless `K8S_VERIFY_SSL=false`.
-
-## PVC mount paths (workbench vs training pods)
-
-* **Workbench mount (user-configured):** a PVC named `shared` is typically mounted at `/opt/app-root/src/shared`.
-* **Training pod mount (SDK, fixed):** `TransformersTrainer(output_dir="pvc://shared/orpheus-tts/checkpoints")` mounts that PVC at `/mnt/kubeflow-checkpoints` inside training pods.
-* **Checkpoint convention:** persisted adapters land under `orpheus-tts/checkpoints/` on the PVC. Prefer `checkpoints/final` for inference.
+If the API URL or token is missing, uncomment and fill them in the notebook auth cell.
 
 ## Setup
 
 ### 1. Create a Data Science Project
 
-Access the OpenShift AI dashboard, open **Data Science Projects**, and create a project for this example (any name; you will set it as `namespace` in the notebook). After creation, the project overview looks like this:
+In the OpenShift AI dashboard, open **Data Science Projects** and create a project. You will set this name as `namespace` in the notebook.
 
 ![](./images/create_project.png)
 
 ### 2. Create a workbench
 
-Create a workbench with the **Training | Jupyter | PyTorch | CUDA | Python** image. Select a hardware profile with a **GPU** and enough memory (notebook path uses **4 CPU / 32 GiB**):
+Use the **Training | Jupyter | PyTorch | CUDA | Python** image and a hardware profile with a **GPU** and enough memory (**4 CPU / 32 GiB** for inference):
 
 ![](./images/create_workbench_image.png)
 
-### 3. Create shared storage (RWX)
+### 3. Attach shared storage (RWX)
 
-In the project, create a PVC with **ReadWriteMany (RWX)** access. Name it **`shared`**, size at least **60 GiB** (**150 GiB** recommended for full-data runs), and mount it on the workbench at **`/opt/app-root/src/shared`**:
+Create a PVC named **`shared`** with **RWX** access (60 GiB minimum; 150 GiB recommended). Mount it on the workbench at **`/opt/app-root/src/shared`**:
 
 ![](./images/create_storage_mount.png)
 
-When the workbench status is **Running**, open it:
+> [!NOTE]
+> Choose a storage class that allows non-root / `fsGroup` writes. If the workbench cannot create files under `/opt/app-root/src/shared`, fix storage before training (see [Troubleshooting](#permission-denied-on-the-shared-pvc)).
+
+When the workbench is **Running**, open it:
 
 ![](./images/workbench_ready.png)
 
 ### 4. Clone the repository
 
-From the workbench, clone this repository (terminal or the JupyterLab **Git → Clone a Repository** dialog):
+In the workbench (terminal or **Git → Clone a Repository**):
 
 ```bash
 git clone https://github.com/red-hat-data-services/red-hat-ai-examples.git
 ```
 
-Navigate to `examples/trainer/orpheus-tts` and open `orpheus_tts_distributed.ipynb`:
+Open `examples/trainer/orpheus-tts/orpheus_tts_distributed.ipynb`:
 
 ![](./images/clone_and_open_notebook.png)
 
-### 5. Edit configuration
+### 5. Edit notebook parameters
 
 In the `%%yaml parameters` cell, set at least:
 
 * `namespace` — your Data Science Project name
-* `mlflow_experiment` — experiment name for tracking (optional if you disable MLflow)
 
-For a quick smoke run, set `max_train_samples` to a small value (for example `2000`) and `num_epochs` to `1`. Use `max_train_samples: 0` for the full ~81K dataset.
+Optional for a quick smoke run: `max_train_samples: 2000`, `num_epochs: 1`. Use `max_train_samples: 0` for the full dataset.
 
-## Running the example
+## Run the notebook
 
-The notebook walks you through:
+Execute cells top to bottom:
 
-1. **Install dependencies** — Kubeflow SDK + `yamlmagic`
-2. **Configure parameters** — `%%yaml parameters` (infrastructure, LoRA, training, logging)
-3. **Define `train_func`** — self-contained training logic (must be inline; `TransformersTrainer` serializes via `inspect.getsource()`)
-4. **Authenticate** — `TrainerClient` via `NOTEBOOK_USER_TOKEN` or the workbench service-account token
-5. **Submit distributed training** — `TransformersTrainer` with DDP, periodic + JIT checkpointing, progression tracking, MLflow env
-6. **Monitor training** — OpenShift AI **Jobs** UI + notebook logs / MLflow
-7. **Resolve LoRA adapter** — pick `checkpoints/final` (or latest checkpoint); no weight merge
-8. **Generate Turkish speech** — load base + LoRA via PEFT and listen to audio in the notebook
-9. **Cleanup** — delete the training job
+1. Install the Kubeflow SDK and `yamlmagic`
+2. Load parameters (`%%yaml parameters`)
+3. Define `train_func` (must stay inline — `TransformersTrainer` serializes it with `inspect.getsource()`)
+4. Authenticate with `OPENSHIFT_API_URL` + `NOTEBOOK_USER_TOKEN`
+5. Submit training (bootstraps `shared/orpheus-tts/*`, then creates the TrainJob)
+6. Monitor in **Develop & train → Jobs** and/or follow logs in the notebook
+7. Resolve the LoRA path (`checkpoints/final` or latest `checkpoint-*`)
+8. Generate Turkish speech in the workbench
+9. Delete the TrainJob when finished (PVC artifacts remain)
 
-## Monitoring
+## Monitor training
 
-### Training progress
+### Jobs dashboard
 
-Open **Develop & train → Jobs**. Select your TrainJob to watch steps, epochs, and loss in real time:
+**Develop & train → Jobs** — select the TrainJob for live steps, epochs, and loss:
 
 ![](./images/jobs_details_progress.png)
 
-### Job list and logs
-
-The Jobs page shows the job list beside live pod logs (package install, model load, LoRA size, dataset size, checkpoint path):
+Job list and pod logs:
 
 ![](./images/jobs_list_logs.png)
 
 > [!TIP]
-> Keep the notebook `get_job_logs(..., follow=True)` cell running until the job finishes. TrainJob pods are garbage-collected after backoff; durable copies also land under `shared/orpheus-tts/logs/`.
+> Keep `get_job_logs(..., follow=True)` running until the job finishes. Pods are garbage-collected after backoff; durable logs also land under `shared/orpheus-tts/logs/`.
 
-### Pause and resume (JIT checkpointing)
+### Pause and resume
 
-Use **Pause** from the row actions menu to suspend a running job and free GPUs. JIT checkpointing writes the current state to the shared PVC so a later resume can continue:
+Use **Pause** on the job to free GPUs. JIT checkpointing writes state to the PVC so resume can continue:
 
 ![](./images/jobs_pause_menu.png)
 
-### Workload admission (Kueue)
+### Kueue admission
 
-Under **Observe & monitor → Workload metrics**, confirm that Kueue has **Admitted** your workloads (workbench, TrainJob, and optional MLflow). This view shows queue utilization, pending vs admitted jobs, and whether the TrainJob cleared Kueue scheduling before pods start:
+**Observe & monitor → Workload metrics** — confirm workloads are **Admitted**:
 
 ![](./images/workload_metrics.png)
 
 ## Expected outcomes
 
-After training completes:
+After a successful run:
 
-* LoRA adapter at `<PVC>/orpheus-tts/checkpoints/final/` (inference = base model + adapter)
-* Intermediate checkpoints at `<PVC>/orpheus-tts/checkpoints/checkpoint-*`
-* MLflow runs with loss curves, audio samples, and WER/CER (when a tracker is configured)
-* Generated audio samples playable in the notebook (reference clips under [`audios/`](./audios/))
+* LoRA adapter under `shared/orpheus-tts/checkpoints/final/` (or `checkpoint-*`)
+* Preprocessed SNAC data and HF cache reused on later runs with the same fingerprint
+* Optional MLflow metrics, audio samples, and WER/CER when a tracker is configured
+* Playable speech from the generate cell in the workbench
 
-### Sample audio
+### Example training charts
 
-Before = pretrained English Orpheus (step 0 / baseline). After = fine-tuned Turkish LoRA.
+Illustrative loss and Whisper probe curves from a full-data multi-GPU run (your numbers will differ with hardware and hyperparameters):
 
-| Clip | Before (step 0) | After (fine-tuned) |
-| --- | --- | --- |
-| welcome | <audio controls src="./audios/before/welcome.wav"></audio> ([wav](./audios/before/welcome.wav)) | <audio controls src="./audios/after/welcome.wav"></audio> ([wav](./audios/after/welcome.wav)) |
-| flight | <audio controls src="./audios/before/flight.wav"></audio> ([wav](./audios/before/flight.wav)) | <audio controls src="./audios/after/flight.wav"></audio> ([wav](./audios/after/flight.wav)) |
-| farewell | <audio controls src="./audios/before/farewell.wav"></audio> ([wav](./audios/before/farewell.wav)) | <audio controls src="./audios/after/farewell.wav"></audio> ([wav](./audios/after/farewell.wav)) |
+![Training loss](./images/training_loss.png)
 
-### Reference results (notebook standalone run)
-
-Executed notebook configuration: **full dataset (~77K train) · 5 epochs · 4× A100 · LoRA r=64 / α=128**.
-
-On a fixed 4-sentence Whisper probe during training:
-
-| Checkpoint | WER mean | CER mean |
-|------------|----------|----------|
-| Mid-training (best WER, ~step 3000) | **~0.34** | **~0.21** |
-| Near end (~step 6000) | ~0.43 | ~0.11 |
-
-Best `eval_loss` during the run was **~3.96**. Prefer mid/late checkpoints for listening.
-
-![Training Loss](./images/training_loss.png)
-
-![WER CER Progress](./images/wer_cer_progress.png)
+![WER / CER progress](./images/wer_cer_progress.png)
 
 ## Customization
 
-Edit the `%%yaml parameters` cell (passed to `train_func` as `func_args`):
-
-| Parameter | Notebook default | Description |
-|-----------|------------------|-------------|
-| `namespace` | _(edit)_ | OpenShift AI project / Kubernetes namespace |
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `namespace` | _(required)_ | Data Science Project / Kubernetes namespace |
 | `mlflow_experiment` | `orpheus-turkish-tts` | MLflow experiment name |
-| `max_train_samples` | `0` (full ~81K) | Training samples (`0` = full dataset) |
+| `max_train_samples` | `0` (full ~81K) | Cap training samples; `0` = full dataset |
 | `num_nodes` | `2` | Distributed training nodes |
-| `gpus_per_node` | `2` | GPUs per training node |
-| `batch_size` | `4` | Per-device batch size (gradient checkpointing enables larger batches) |
+| `gpus_per_node` | `2` | GPUs per node |
+| `batch_size` | `4` | Per-device batch size |
 | `grad_accum` | `4` | Gradient accumulation steps |
 | `num_epochs` | `5` | Training epochs |
-| `learning_rate` | `1e-4` | AdamW learning rate (LoRA typically 1e-4–2e-4) |
-| `lora_r` | `64` | LoRA rank |
-| `lora_alpha` | `128` | LoRA alpha |
-| `lora_dropout` | `0.05` | LoRA dropout |
-| `save_steps` | `500` | Checkpoint cadence |
-| `eval_steps` | `250` | Loss evaluation cadence |
-| `audio_log_steps` | `1000` | In-training wav + Whisper cadence (keep sparse) |
-
-For quicker experiments, lower `max_train_samples`, `num_epochs`, or LoRA rank.
+| `learning_rate` | `1e-4` | AdamW learning rate |
+| `lora_r` / `lora_alpha` / `lora_dropout` | `64` / `128` / `0.05` | LoRA settings |
+| `save_steps` / `eval_steps` / `audio_log_steps` | `500` / `250` / `1000` | Checkpoint and logging cadence |
 
 ## Troubleshooting
 
+### Permission denied on the shared PVC
+
+Symptoms: `PermissionError` creating `shared/orpheus-tts/…` in the notebook, or `Permission denied: '/mnt/kubeflow-checkpoints/orpheus-tts'` in TrainJob logs.
+
+The submit cell creates that tree from the workbench and applies group-write + setgid for TrainJob pods. If it still fails, the volume is not writable by the project. Prefer an `fsGroup`-aware storage class, recreate the PVC, or have an admin grant the project supplemental group write access (`openshift.io/sa.scc.supplemental-groups`). Avoid world-writable (`o+w`) permissions.
+
 ### SNAC preprocessing is slow
 
-SNAC encoding runs on GPU inside the TrainJob (rank 0). For large datasets (>10K samples), the first run may take 15–30 minutes. Subsequent runs skip preprocessing when a matching versioned `.done-<hash>` sentinel exists on the PVC.
+First full-data encode can take tens of minutes on GPU (rank 0). Later runs skip work when a matching `.done-<hash>` sentinel exists on the PVC.
 
 ### Lost pod logs after failure
 
-TrainJob pods are deleted after backoff. `train_func` tees logs to the shared PVC:
+Pods are deleted after backoff. Check:
 
 ```text
 shared/orpheus-tts/logs/rank0.log
-shared/orpheus-tts/logs/rank0-FATAL.txt   # written on uncaught exception
+shared/orpheus-tts/logs/rank0-FATAL.txt
 ```
 
-Also keep the notebook `get_job_logs(..., follow=True)` cell running until the job finishes, or fetch logs immediately on failure before GC.
+### Job failed mid-training — does it start over?
 
-### Job failed mid-training — will it start from scratch?
+No, if PVC artifacts remain:
 
-No, if the shared PVC still has artifacts:
+| Artifact | Behavior on resubmit |
+| --- | --- |
+| `hf-cache/` | Reused |
+| `preprocessed/` + matching `.done-<hash>` | Skipped |
+| `checkpoints/checkpoint-*` | Auto-resumed |
 
-| Artifact | Location | Behavior on retry |
-|----------|----------|-------------------|
-| HF model/dataset cache | `orpheus-tts/hf-cache/` | Reused (no re-download) |
-| Preprocessed SNAC data | `orpheus-tts/preprocessed/` + `.done-<hash>` | Skipped if fingerprint matches |
-| Trainer checkpoints | `orpheus-tts/checkpoints/checkpoint-*` | Auto-resumed via `get_last_checkpoint` |
-
-Resubmit the TrainJob with the same fingerprint. The preprocess sentinel hashes dataset id, sample/seq limits, base model, SNAC model id, and encode constants (`SNAC_SR`, `CODE_OFFSET`, frames/codebook). It does **not** pin Hugging Face dataset/model git revisions — if you change the upstream revision or preprocessing code beyond those fields, delete `orpheus-tts/preprocessed/` (and the `.done-*` sentinels) before rerunning. Checkpoints from a different hyperparameter set should be cleared manually if you do not want to resume them.
-
-### Permission denied on the shared PVC
-
-Some NFS storage classes provision volumes as `root:<fixed-gid>` with mode `755`. Training pods then cannot write. Prefer a storage class that respects `fsGroup`, or set a group ACL / shared GID so only the project workloads that need write access can update checkpoints and preprocessed data. Avoid world-writable (`o+w`) permissions.
+Clear `preprocessed/` (and `.done-*`) if you change dataset/model revisions or preprocessing beyond the fingerprint fields. Clear checkpoints if you do not want to resume a different hyperparameter set.
 
 ### Out of memory during training
 
-Reduce `batch_size` to 1 and increase `grad_accum` to maintain the same effective batch size. Alternatively, use GPUs with more VRAM.
+Lower `batch_size` (try `1`), then raise `grad_accum` if needed. Use larger-VRAM GPUs when possible.
 
 ### Out of memory during inference
 
-Base + LoRA load runs in the **workbench**, not the TrainJob. Use at least **32Gi** workbench memory (see hardware profile limits).
+Inference runs in the **workbench**. Use at least **32 GiB** workbench memory.
 
 ### MLflow connection errors
 
-Training pods use `MLFLOW_TRACKING_URI` from the workbench env when set; otherwise they fall back to the in-namespace service `http://mlflow.<namespace>.svc.cluster.local:5000` (cluster-internal HTTP). Prefer HTTPS with a trusted cert when available. Only set `MLFLOW_TRACKING_INSECURE_TLS=true` for development against a self-signed tracker. Point the workbench (or trainer `env`) at a reachable tracker, or temporarily set `report_to="none"` in `train_func` for a smoke run.
+Pods use `MLFLOW_TRACKING_URI` when set; otherwise `http://mlflow.<namespace>.svc.cluster.local:5000`. Prefer HTTPS with a trusted cert. Set `MLFLOW_TRACKING_INSECURE_TLS=true` only for self-signed trackers, or set `report_to="none"` in `train_func` for a smoke run without MLflow.
 
-### NCCL errors / "No space left on device" on `/dev/shm`
+### NCCL / `/dev/shm` errors
 
-When using multiple GPUs per node (`gpus_per_node > 1`), NCCL allocates shared-memory segments under `/dev/shm` for intra-node communication. The default Kubernetes `emptyDir` is 64MB — too small. The notebook injects a `PodTemplateOverrides` with a 1Gi memory-backed `/dev/shm` volume. If you remove that override and see:
-
-```text
-Error while creating shared memory segment /dev/shm/nccl-… No space left on device
-```
-
-Re-add the `shm_override` in the submit cell.
-
-For other NCCL issues:
-
-```bash
-oc logs <pod-name> -c node | grep -i "nccl"
-```
-
-Add `NCCL_DEBUG=INFO` to the trainer `env` dict for diagnostics.
+With `gpus_per_node > 1`, NCCL needs more than the default 64 MiB `/dev/shm`. The notebook mounts a 1 GiB memory-backed volume. Keep that `shm_override` in the submit cell. For other NCCL issues, add `NCCL_DEBUG=INFO` to the trainer `env`.
 
 ### Generated audio is silent or garbled
 
-* Verify the preprocessed dataset has a matching `.done-<hash>` sentinel on the PVC
-* Check that the SNAC model was downloaded correctly
-* Ensure the base model is `unsloth/orpheus-3b-0.1-pretrained` (Llama-3 vocab, not Llama-2)
-* Keep `gen_min_new_tokens` low (notebook uses `28`) so `TOK_EOA` can stop early
+* Confirm preprocess finished (matching `.done-<hash>` on the PVC)
+* Confirm SNAC and `unsloth/orpheus-3b-0.1-pretrained` loaded correctly
+* Keep generation `min_new_tokens` low (notebook default `28`) so end-of-audio can stop early
 
 ## References
 
-* [Orpheus-TTS](https://github.com/canopyai/Orpheus-TTS) — Lacombe & Kumar, 2025
-* [SNAC: Multi-Scale Neural Audio Codec](https://github.com/hubertsiuzdak/snac) — Siuzdak, 2024
-* [Kubeflow Trainer v2](https://github.com/kubeflow/trainer) — TrainJob API
-* [PEFT: Parameter-Efficient Fine-Tuning](https://github.com/huggingface/peft) — HuggingFace
-* [Kubeflow Trainer documentation](https://www.kubeflow.org/docs/components/trainer/)
+* [Orpheus-TTS](https://github.com/canopyai/Orpheus-TTS)
+* [SNAC](https://github.com/hubertsiuzdak/snac)
+* [Kubeflow Trainer](https://www.kubeflow.org/docs/components/trainer/)
+* [PEFT](https://github.com/huggingface/peft)
