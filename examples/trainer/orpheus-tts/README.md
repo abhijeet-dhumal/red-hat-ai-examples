@@ -14,11 +14,11 @@ Orpheus-3B is a 3.3B-parameter codec language model (Llama-3 backbone) that gene
 | **Progress tracking** | Live steps, epochs, loss, and ETA in the OpenShift AI Jobs dashboard |
 | **JIT checkpointing** | Pause-safe / preemption-safe saves to the shared PVC; auto-resume on restart |
 | **Kueue scheduling** | TrainJobs admitted and queued through Kueue |
-| **MLflow tracking** | Loss, in-training WAV samples, and Whisper WER/CER (optional tracker) |
+| **MLflow tracking** | Loss, in-training WAV samples, and Whisper WER/CER via RHOAI platform MLflow |
 | **Post-training inference** | Load base model + LoRA adapter in the workbench (no weight merge) |
 
 > [!IMPORTANT]
-> Tested with OpenShift AI 3.2+ and Kubeflow Trainer v2 on NVIDIA A100-80GB.
+> Tested with OpenShift AI 3.4+ and Kubeflow Trainer v2 on NVIDIA A100-80GB.
 > On different GPUs, adjust `batch_size`, `grad_accum`, and `resources_per_node` in the notebook.
 
 ### How it works
@@ -46,10 +46,10 @@ During fine-tuning, each example is a single sequence of Turkish text tokens fol
 
 ### OpenShift AI cluster
 
-* Red Hat OpenShift AI (RHOAI) 3.2+ with `dashboard`, `trainer`, and `workbenches` enabled
+* Red Hat OpenShift AI (RHOAI) 3.4+ with `dashboard`, `trainer`, `workbenches`, and `mlflowoperator` enabled
+* An `MLflow` CR deployed — see [Install and configure MLflow](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html/working_with_mlflow/installing-mlflow_mlflow)
 * At least 2 GPU worker nodes (A100 recommended)
 * A storage class that supports **ReadWriteMany (RWX)** PVCs and **non-root / `fsGroup` writes**
-* Optional: MLflow reachable from training pods (platform MLflow, or in-namespace `http://mlflow.<namespace>.svc.cluster.local:5000`)
 
 ### Hardware
 
@@ -74,7 +74,7 @@ During fine-tuning, each example is a single sequence of Turkish text tokens fol
 | --- | --- | --- | --- |
 | PVC named `shared` | 150 GiB recommended (60 GiB minimum) | RWX | Must be writable from the workbench |
 
-Layout (created automatically by the Training Job cell):
+Layout (created automatically by `train_func` at runtime):
 
 ```text
 shared/orpheus-tts/
@@ -98,10 +98,10 @@ Usually auto-set in OpenShift AI workbenches:
 | --- | --- | --- |
 | `OPENSHIFT_API_URL` | Yes | OpenShift API server URL |
 | `NOTEBOOK_USER_TOKEN` | Yes | User token for API access (`oc whoami -t` if unset) |
-| `MLFLOW_TRACKING_URI` | No | Tracker URL for training pods |
-| `MLFLOW_TRACKING_INSECURE_TLS` | No | Set `true` only for self-signed HTTPS trackers |
+| `MLFLOW_TRACKING_URI` | Auto | Auto-injected when the workbench has the `opendatahub.io/mlflow-instance` annotation |
+| `MLFLOW_TRACKING_AUTH` | Auto | Set to `kubernetes-namespaced` by the platform; training pods inherit this |
 
-If the API URL or token is missing, uncomment and fill them in the notebook auth cell.
+If the API URL or token is missing, uncomment and fill them in the notebook auth cell. MLflow environment variables are automatically configured when the MLflow Operator is enabled — see [Track experiments in workbenches](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html/working_with_mlflow/tracking-experiments-with-mlflow-in-workbenches).
 
 ## Setup
 
@@ -158,7 +158,7 @@ Execute cells top to bottom:
 2. Load parameters (`%%yaml parameters`)
 3. Define `train_func` (must stay inline — `TransformersTrainer` serializes it with `inspect.getsource()`)
 4. Authenticate with `OPENSHIFT_API_URL` + `NOTEBOOK_USER_TOKEN`
-5. Submit training (bootstraps `shared/orpheus-tts/*`, then creates the TrainJob)
+5. Submit the TrainJob
 6. Monitor in **Develop & train → Jobs** and/or follow logs in the notebook
 7. Resolve the LoRA path (`checkpoints/final` or latest `checkpoint-*`)
 8. Generate Turkish speech in the workbench
@@ -197,7 +197,7 @@ After a successful run:
 
 * LoRA adapter under `shared/orpheus-tts/checkpoints/final/` (or `checkpoint-*`)
 * Preprocessed SNAC data and HF cache reused on later runs with the same fingerprint
-* Optional MLflow metrics, audio samples, and WER/CER when a tracker is configured
+* MLflow metrics, audio samples, and WER/CER logged to the RHOAI platform MLflow
 * Playable speech from the generate cell in the workbench
 
 ### Example training charts
@@ -230,7 +230,7 @@ Illustrative loss and Whisper probe curves from a full-data multi-GPU run (your 
 
 Symptoms: `PermissionError` creating `shared/orpheus-tts/…` in the notebook, or `Permission denied: '/mnt/kubeflow-checkpoints/orpheus-tts'` in TrainJob logs.
 
-The submit cell creates that tree from the workbench and applies group-write + setgid for TrainJob pods. If it still fails, the volume is not writable by the project. Prefer an `fsGroup`-aware storage class, recreate the PVC, or have an admin grant the project supplemental group write access (`openshift.io/sa.scc.supplemental-groups`). Avoid world-writable (`o+w`) permissions.
+`train_func` creates that tree at runtime. If it still fails, the volume is not writable by the project. Prefer an `fsGroup`-aware storage class, recreate the PVC, or have an admin grant the project supplemental group write access (`openshift.io/sa.scc.supplemental-groups`). Avoid world-writable (`o+w`) permissions.
 
 ### SNAC preprocessing is slow
 
@@ -267,7 +267,16 @@ Inference runs in the **workbench**. Use at least **32 GiB** workbench memory.
 
 ### MLflow connection errors
 
-Pods use `MLFLOW_TRACKING_URI` when set; otherwise `http://mlflow.<namespace>.svc.cluster.local:5000`. Prefer HTTPS with a trusted cert. Set `MLFLOW_TRACKING_INSECURE_TLS=true` only for self-signed trackers, or set `report_to="none"` in `train_func` for a smoke run without MLflow.
+Training pods use the RHOAI platform MLflow at `https://mlflow.redhat-ods-applications.svc:8443/mlflow` with `kubernetes-namespaced` authentication. If pods get 403 errors, ensure the training service account has the `mlflow-operator-mlflow-integration` ClusterRole:
+
+```bash
+oc create rolebinding <name>-mlflow-integration \
+  --clusterrole=mlflow-operator-mlflow-integration \
+  --serviceaccount=<namespace>:default \
+  -n <namespace>
+```
+
+To run without MLflow, set `report_to="none"` in `train_func`.
 
 ### NCCL / `/dev/shm` errors
 
