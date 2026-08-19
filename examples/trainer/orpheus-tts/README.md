@@ -191,6 +191,32 @@ Use **Pause** on the job to free GPUs. JIT checkpointing writes state to the PVC
 
 ![](./images/workload_metrics.png)
 
+### TensorBoard
+
+As an alternative to MLflow, TensorBoard can be used to monitor training metrics in real time directly from the workbench. The notebook includes a cell that starts TensorBoard and points it at the shared PVC checkpoint directory:
+
+![TensorBoard metrics](./images/tensorboard_metrics.png)
+
+### MLflow experiment tracking
+
+`train_func` logs training metrics, system resource usage, audio samples, and evaluation results to the RHOAI platform MLflow instance. See [MLflow integration](../../fine-tuning/mlflow.md) for setup and configuration.
+
+**Model metrics** — loss, eval loss, learning rate, gradient norm, and real-time factor across all training steps:
+
+![MLflow model metrics](./images/mlflow_model_metrics.png)
+
+**System metrics** — per-GPU power draw, wattage, and utilization logged via `mlflow.enable_system_metrics_logging()` in `train_func`:
+
+![MLflow system metrics](./images/mlflow_system_metrics.png)
+
+**Artifacts — evaluation table** — each eval step logs a JSON table with WER, CER, RTF, and Whisper transcriptions for each test sentence. LoRA adapter checkpoints are saved per epoch:
+
+![MLflow eval artifacts](./images/mlflow_artifacts_eval.png)
+
+**Artifacts — audio samples** — generated Turkish speech WAVs are logged at configurable intervals and playable directly in the MLflow UI:
+
+![MLflow audio artifacts](./images/mlflow_artifacts_audio.png)
+
 ## Expected outcomes
 
 After a successful run:
